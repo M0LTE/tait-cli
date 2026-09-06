@@ -1,6 +1,6 @@
 # tait-cli
 
-A small shell for a Tait TM8100/TM8200 mobile radio over its CCDI serial port, built on the [M0LTE.Radio.Tait](https://www.nuget.org/packages/M0LTE.Radio.Tait) package.
+A small shell for a Tait TM8100/TM8200 mobile radio over its CCDI serial port, built on the [M0LTE.Tait.Ccdi](https://www.nuget.org/packages/M0LTE.Tait.Ccdi) package.
 
 ## Run
 

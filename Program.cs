@@ -3,7 +3,7 @@
 //   tait-cli <port> [--baud N]              interactive shell
 //   tait-cli <port> [--baud N] <command>    run one command and exit
 
-using M0LTE.Radio.Tait;
+using M0LTE.Tait.Ccdi;
 
 const int DefaultBaud = 28800;
 const int Quit = -1;
@@ -235,7 +235,7 @@ async Task WatchAsync(string[] argv, CancellationToken ct)
 
 async Task DisplayAsync(CancellationToken ct)
 {
-    IReadOnlyList<M0LTE.Radio.Tait.Ccdi.CcdiDisplayMessage> elements;
+    IReadOnlyList<CcdiDisplayMessage> elements;
     try
     {
         elements = await radio.QueryDisplayAsync(ct);

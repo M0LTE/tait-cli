@@ -11,7 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="M0LTE.Radio.Tait" Version="0.1.0" />
+    <PackageReference Include="M0LTE.Tait.Ccdi" Version="0.2.0" />
   </ItemGroup>
 
 </Project>
