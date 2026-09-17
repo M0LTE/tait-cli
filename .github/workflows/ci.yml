@@ -1,0 +1,34 @@
+name: ci
+
+# Build on every push and PR. GitHub-hosted runners: this is a public repo, so standard-runner
+# minutes are free, and the job needs nothing but a .NET SDK.
+#
+# There is no test project in this repo, so this is a build gate and nothing more: it catches a
+# broken build before a tag tries to release one. If tests are ever added, add a `dotnet test
+# -c Release --no-build` step after the build, the way the sibling tait-codeplug repo has it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: build
+        run: dotnet build -c Release
