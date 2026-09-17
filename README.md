@@ -2,7 +2,37 @@
 
 A small shell for a Tait TM8100/TM8200 mobile radio over its CCDI serial port, built on the [M0LTE.Tait.Ccdi](https://www.nuget.org/packages/M0LTE.Tait.Ccdi) package.
 
+## Install
+
+**Debian, Ubuntu, Raspberry Pi OS** - from the [packet-net apt repository](https://github.com/packet-net/apt), which is the easy route on the machine the radio is plugged into, because `apt upgrade` then keeps it current along with everything else:
+
+```sh
+curl -fsSL https://packet-net.github.io/apt/pubkey.asc | sudo gpg --dearmor -o /usr/share/keyrings/packet-net.gpg
+echo "deb [signed-by=/usr/share/keyrings/packet-net.gpg] https://packet-net.github.io/apt ./" | sudo tee /etc/apt/sources.list.d/packet-net.list
+sudo apt update && sudo apt install tait-cli
+```
+
+Packages are built for `amd64`, `arm64` and `armhf` (armv7, a 32-bit Pi).
+
+**Anything else** - download the binary for your platform from the [latest release](https://github.com/M0LTE/tait-cli/releases/latest) and run it. Every build is self-contained and single-file: the .NET runtime is inside it, so the machine needs no .NET installed.
+
+```sh
+curl -LO https://github.com/M0LTE/tait-cli/releases/latest/download/tait-cli-0.1.0-linux-x64
+chmod +x tait-cli-0.1.0-linux-x64
+./tait-cli-0.1.0-linux-x64 --help
+```
+
+There are assets for `linux-x64`, `linux-arm64`, `linux-arm`, `win-x64`, `osx-x64` and `osx-arm64`, plus the three `.deb` files for installing by hand, and a `SHA256SUMS` covering all of them.
+
 ## Run
+
+```sh
+tait-cli /dev/ttyUSB0                  # interactive shell
+tait-cli /dev/ttyUSB0 rssi             # one command, then exit
+tait-cli /dev/ttyUSB0 --baud 19200 info
+```
+
+From a checkout, without installing anything, `dotnet run --` takes the same arguments:
 
 ```sh
 dotnet run -- /dev/ttyUSB0             # interactive shell

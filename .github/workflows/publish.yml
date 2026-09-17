@@ -1,0 +1,263 @@
+name: publish
+
+# A `v*` tag ships the tool: self-contained, single-file executables for the common
+# desktop/server arches, plus .deb packages for the three Linux ones, all attached to a GitHub
+# Release. Each asset embeds the .NET runtime and the native serial library, so it runs on a
+# machine with no .NET installed.
+#
+# This repo is an application, not a library. There is nothing to push to nuget.org: the CCDI
+# protocol code people would want to consume lives in M0LTE.Tait.Ccdi, which is published from
+# its own repo.
+#
+# Single-file gotcha handled: System.IO.Ports (via M0LTE.Tait.Ccdi) ships a native library that
+# a naive single-file publish drops beside the executable.
+# `IncludeNativeLibrariesForSelfExtract=true` bundles it into the one file (extracted to a temp
+# dir on first run); `EnableCompressionInSingleFile=true` keeps the download to ~39 MB instead
+# of ~70 MB. No trimming - System.IO.Ports is not trim-safe, and a broken cross-arch binary
+# cannot be caught here.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the v prefix, e.g. 0.1.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Job level, not step level: a secret put in a step's own `env:` is not visible to that
+    # step's `if:`, so the "is the token there?" test below has to read it from here.
+    env:
+      APT_DISPATCH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+    permissions:
+      contents: write   # gh release create
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the release notes fall back to commit subjects since the previous tag
+          # when CHANGELOG.md has no section for this version.
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - id: v
+        name: Resolve version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Gate - build
+        # A build that does not compile must never reach the Release. There is no test project
+        # in this repo yet; when there is one, add `dotnet test -c Release --no-build` here.
+        run: dotnet build -c Release
+
+      - name: Build self-contained single-file binaries (all arches)
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          proj=tait-cli.csproj
+          rm -rf release && mkdir -p release
+          for rid in linux-x64 linux-arm64 linux-arm win-x64 osx-x64 osx-arm64; do
+            echo "==> publishing $rid"
+            out="publish/$rid"
+            rm -rf "$out"
+            dotnet publish "$proj" -c Release -r "$rid" --self-contained true \
+              -p:Version="${VERSION}" \
+              -p:PublishSingleFile=true \
+              -p:IncludeNativeLibrariesForSelfExtract=true \
+              -p:EnableCompressionInSingleFile=true \
+              -p:DebugType=none -p:GenerateDocumentationFile=false \
+              -o "$out"
+            # The AssemblyName is tait-cli (+ .exe on Windows). Stage a version-stamped,
+            # arch-named copy as the release asset.
+            if [ "$rid" = "win-x64" ]; then
+              cp "$out/tait-cli.exe" "release/tait-cli-${VERSION}-${rid}.exe"
+            else
+              cp "$out/tait-cli" "release/tait-cli-${VERSION}-${rid}"
+            fi
+          done
+          file release/*
+          ls -l release/
+
+      - name: Build .deb packages
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Pin the changelog date to the commit being built so a rebuild of a tag is
+          # byte-identical. %ct is always a Unix timestamp, unlike the event payload's
+          # pushed_at, which is an integer for push events and an ISO string elsewhere.
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          # This publishes the three Linux arches a second time rather than repackaging what
+          # the loop above produced. It costs a couple of minutes and buys the guarantee that
+          # the .deb payload was built with exactly the flags in build-deb.sh, which is where
+          # someone will look when a packaged binary misbehaves.
+          for arch in amd64 arm64 armhf; do
+            echo "::group::deb $arch"
+            packaging/build-deb.sh "${VERSION}" "$arch" ./release
+            echo "::endgroup::"
+          done
+          ls -l release/*.deb
+
+      - name: Verify .deb contents
+        run: |
+          set -euo pipefail
+          for deb in ./release/*.deb; do
+            echo "::group::$(basename "$deb")"
+            dpkg-deb --info "$deb"
+            # Capture the listing once and match it in memory. Piping dpkg-deb straight into
+            # `grep -q` makes grep close the pipe the moment it matches, and the SIGPIPE
+            # dpkg-deb takes for that becomes a pipeline failure under pipefail.
+            listing="$(dpkg-deb --contents "$deb")"
+            echo "$listing"
+            # The program itself. A plain file, not a symlink: the single-file publish bundles
+            # the native shim, so there is no payload directory to point at.
+            grep -qE '^-rwxr-xr-x .* \./usr/bin/tait-cli$' <<<"$listing"
+            # Debian requires a copyright file, and this one carries the AGPL notice.
+            grep -q 'usr/share/doc/tait-cli/copyright$' <<<"$listing"
+            grep -q 'usr/share/doc/tait-cli/changelog\.Debian\.gz$' <<<"$listing"
+            # xz, not the host dpkg's zstd default: dpkg older than 1.21.18 (bullseye, and so
+            # Raspberry Pi OS bullseye) cannot read a zstd archive at all. `ar t` is what shows
+            # this - dpkg-deb --info does not name the members.
+            members="$(ar t "$deb")"
+            grep -qx 'data.tar.xz' <<<"$members" || {
+              echo "::error::$(basename "$deb") is not xz-compressed ($members); bullseye would refuse it"
+              exit 1
+            }
+            echo "::endgroup::"
+          done
+
+      - name: Checksums + create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd release
+          # The .deb files are tait-cli_<version>_<arch>.deb: an underscore, so the tait-cli-*
+          # glob that catches the binaries does not match them. Both globs, deliberately.
+          sha256sum tait-cli-* tait-cli_*.deb > SHA256SUMS
+          cat SHA256SUMS
+          cd ..
+          # Release notes = what changed in this version, then how to install it. The changes come
+          # from CHANGELOG.md; if that has no section for this version (someone forgot), fall back to
+          # the commit subjects since the previous tag so a release never ships an empty list.
+          awk -v ver="${VERSION}" '
+            substr($0, 1, 3) == "## " {
+              if (inside) { exit }
+              split(substr($0, 4), header, " ")
+              if (header[1] == ver) { inside = 1 }
+              next
+            }
+            inside { print }
+          ' CHANGELOG.md > release/CHANGES.md
+
+          if [ ! -s release/CHANGES.md ]; then
+            echo "::warning::CHANGELOG.md has no section for ${VERSION}; using commit subjects instead."
+            # HEAD, not v${VERSION}: on a workflow_dispatch run the tag does not exist yet - the
+            # `gh release create` below is what creates it - so naming it here exits 128 and takes
+            # the whole release step with it.
+            previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+            if [ -n "${previous}" ]; then
+              git log --format='- %s' "${previous}..HEAD" > release/CHANGES.md
+            else
+              git log --format='- %s' -20 HEAD > release/CHANGES.md
+            fi
+          fi
+
+          {
+            echo "## What's changed in ${VERSION}"
+            echo
+            cat release/CHANGES.md
+            echo
+            echo "---"
+            echo
+            sed "s/__VER__/${VERSION}/g; s#__REPO__#${REPO}#g" .github/release-notes.md
+          } > release/NOTES.md
+          cat release/NOTES.md
+          # Create the release empty, attach the assets one at a time, then publish it.
+          #
+          # This used to be a single `gh release create` with all ten assets on it, in the sibling
+          # tait-codeplug repo this workflow is modelled on. That is about 340 MB in one command,
+          # and on its v0.14.0 it failed twice with `HTTP 500: Error saving asset` from
+          # uploads.github.com, on a different asset each time. One flaky upload took the entire
+          # release with it, leaving a tag with no release behind it.
+          #
+          # A draft is deliberate rather than tidiness: packet-net/apt indexes whatever
+          # `releases/latest` carries, and `releases/latest` ignores drafts. Publishing the release
+          # before its .deb files are attached would briefly advertise a version whose packages are
+          # missing, and an apt rebuild landing in that window would index it.
+          if gh release view "v${VERSION}" --repo "${REPO}" >/dev/null 2>&1; then
+            echo "release v${VERSION} already exists; refreshing its notes and assets."
+            gh release edit "v${VERSION}" --repo "${REPO}" \
+              --title "tait-cli ${VERSION}" --notes-file release/NOTES.md
+          else
+            gh release create "v${VERSION}" --repo "${REPO}" --draft \
+              --title "tait-cli ${VERSION}" --notes-file release/NOTES.md
+          fi
+
+          # --clobber so a re-run repairs a partial upload rather than starting again, which is the
+          # state a failure here leaves behind.
+          for asset in release/tait-cli-"${VERSION}"-* \
+                       release/tait-cli_"${VERSION}"_*.deb \
+                       release/SHA256SUMS; do
+            name="$(basename "$asset")"
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "v${VERSION}" "$asset" --repo "${REPO}" --clobber; then
+                echo "uploaded $name"
+                break
+              fi
+              if [ "$attempt" = 5 ]; then
+                echo "::error::could not upload $name after 5 attempts"
+                exit 1
+              fi
+              echo "::warning::upload of $name failed (attempt $attempt of 5); retrying"
+              sleep "$((attempt * 10))"
+            done
+          done
+
+          # Everything is attached, so it can go live and be seen by releases/latest.
+          gh release edit "v${VERSION}" --repo "${REPO}" --draft=false
+
+      - name: Tell the apt repo to rebuild
+        # Last, and only after the release has been published: packet-net/apt indexes whatever
+        # is on `releases/latest` when it runs, so dispatching before the assets exist would
+        # just make it re-index the previous release.
+        if: env.APT_DISPATCH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          # Fire and forget: packet-net/apt rebuilds its whole index from every source repo's
+          # latest release, so the payload is only there for the run log. A failure here must
+          # not fail a release that has already shipped - the hourly cron picks it up.
+          #
+          # gh api --input - with a JSON body, not -f client_payload[...]=...: gh's -f does not
+          # do curl-style bracket nesting, so the nested object has to arrive as JSON.
+          payload=$(printf '{"event_type":"release-published","client_payload":{"repo":"%s","tag":"v%s"}}' \
+            "$GITHUB_REPOSITORY" "$VERSION")
+          if printf '%s' "$payload" | gh api -X POST repos/packet-net/apt/dispatches --input -; then
+            echo "apt repo rebuild triggered."
+          else
+            echo "::warning::could not trigger the packet-net/apt rebuild; its hourly cron will pick this release up."
+          fi
+
+      - name: Warn if APT_DISPATCH_TOKEN missing
+        # Not a failure. The apt repo's cron is the fallback, so a release without the secret
+        # still reaches apt, just later.
+        if: env.APT_DISPATCH_TOKEN == ''
+        run: echo "::warning::APT_DISPATCH_TOKEN is not visible to this repo - the apt repo was not poked. It will pick this release up within the hour."
