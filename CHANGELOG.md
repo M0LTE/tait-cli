@@ -4,6 +4,13 @@ What changed in each release. The section for a version is lifted into that vers
 
 Newest first. Add a section before tagging.
 
+## 0.1.1 - 2026-09-20
+
+A packaging fix. The tool itself is unchanged.
+
+- **The `armhf` package no longer installs onto machines it cannot run on.** .NET 10 needs glibc 2.34 on 32-bit ARM, which Debian 11 and 32-bit Raspberry Pi OS bullseye do not have, but the package declared a bare `libc6` with no version, so apt installed it happily and the binary then died in the dynamic loader with ``version `GLIBC_2.33' not found``. The package now declares the floor it actually needs, so apt explains the problem before installing rather than leaving you with a command that will not start. On a 32-bit bullseye Pi the ways forward are the 64-bit image with the `arm64` package, or an upgrade to bookworm. `amd64` and `arm64` are unaffected and install as before on anything with glibc 2.27 or newer.
+- The dependency floors are now read out of the compiled binary when the package is built, rather than written by hand, so they cannot silently fall out of date the next time a .NET runtime pack moves them.
+
 ## 0.1.0 - 2026-09-17
 
 First release. The tool itself is unchanged; what is new is that there is now a way to get it onto a radio's host machine without a .NET SDK and a `git clone`.
